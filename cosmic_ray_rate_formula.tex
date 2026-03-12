@@ -1,0 +1,148 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+
+\title{Analytical Cosmic-Ray Threshold Rate Formula}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+This document summarizes the analytical approximation calibrated from
+\texttt{data.csv}, where the numerical content behaves as
+\[
+E \; [\mathrm{eV}], \qquad
+F(E) \; [(\mathrm{m}^2\,\mathrm{sr}\,\mathrm{s}\,\mathrm{GeV})^{-1}] .
+\]
+
+For a flat horizontal detector of area
+\(\SI{1}{km^2}\), exposed to an isotropic downward flux, the threshold rate is
+\[
+R(>E_{\mathrm{th}})
+=
+\pi \times 10^{-3}
+\int_{E_{\mathrm{th}}}^{\infty} F(E)\, dE ,
+\]
+where \(E\) is measured in eV. The factor \(10^{-3}\) comes from the
+combination of
+\[
+dE_{\mathrm{GeV}} = 10^{-9}\, dE_{\mathrm{eV}}
+\qquad \text{and} \qquad
+\SI{1}{km^2} = 10^6\,\si{m^2}.
+\]
+
+The following piecewise power-law approximation gives
+\[
+R(>E) \quad [\mathrm{s}^{-1}\,\mathrm{km}^{-2}]
+\]
+for
+\[
+10^{10}\,\mathrm{eV} \le E \le 10^{20}\,\mathrm{eV} :
+\]
+
+\[
+R(>E) \approx
+\begin{cases}
+4.061 \times 10^8
+\left(\dfrac{E}{10^{10}\,\mathrm{eV}}\right)^{-1.5452},
+& 10^{10} \le E < 10^{12}\,\mathrm{eV},
+\\[1.2em]
+3.298 \times 10^5
+\left(\dfrac{E}{10^{12}\,\mathrm{eV}}\right)^{-1.6679},
+& 10^{12} \le E < 2 \times 10^{15}\,\mathrm{eV},
+\\[1.2em]
+1.029
+\left(\dfrac{E}{2 \times 10^{15}\,\mathrm{eV}}\right)^{-1.9606},
+& 2 \times 10^{15} \le E < 5 \times 10^{16}\,\mathrm{eV},
+\\[1.2em]
+1.870 \times 10^{-3}
+\left(\dfrac{E}{5 \times 10^{16}\,\mathrm{eV}}\right)^{-2.2102},
+& 5 \times 10^{16} \le E < 3 \times 10^{18}\,\mathrm{eV},
+\\[1.2em]
+2.196 \times 10^{-7}
+\left(\dfrac{E}{3 \times 10^{18}\,\mathrm{eV}}\right)^{-1.9198},
+& 3 \times 10^{18} \le E < 3 \times 10^{19}\,\mathrm{eV},
+\\[1.2em]
+2.642 \times 10^{-9}
+\left(\dfrac{E}{3 \times 10^{19}\,\mathrm{eV}}\right)^{-2.6838},
+& 3 \times 10^{19} \le E \le 10^{20}\,\mathrm{eV}.
+\end{cases}
+\]
+
+The approximation was checked against the more exact log-log interpolation and
+integration implemented in \texttt{cosmic\_ray\_rate.py}. Over the range
+\(10^{10}\) to \(10^{20}\,\mathrm{eV}\), the relative error is approximately
+\[
+\text{median} \approx 5.45\%, \qquad
+\text{95th percentile} \approx 15.62\%, \qquad
+\text{worst case} \approx 18.44\%.
+\]
+
+For a detector with area \(A\) in \(\si{km^2}\), multiply the above result by
+\(A\).
+
+\bigskip
+
+For convenience, the table below lists the rate above several decade thresholds.
+The ``Analytical'' column uses the piecewise power-law approximation above. The
+``Exact'' column uses the CSV-based log-log interpolation and integration from
+\texttt{cosmic\_ray\_rate.py} when the threshold lies inside the tabulated data
+range.
+
+\begin{center}
+\small
+\begin{tabular}{c c c}
+\hline
+Threshold energy \(E_{\mathrm{th}}\) [eV] & Analytical \(R(>E_{\mathrm{th}})\) [\(\mathrm{s}^{-1}\,\mathrm{km}^{-2}\)] & Exact [\(\mathrm{s}^{-1}\,\mathrm{km}^{-2}\)] \\
+\hline
+\(10^{12}\)                  & \(3.297623 \times 10^{5}\)  & \(3.297623 \times 10^{5}\) \\
+\(1.78 \times 10^{12}\)      & \(1.262518 \times 10^{5}\)  & \(1.207683 \times 10^{5}\) \\
+\(3.16 \times 10^{12}\)      & \(4.833640 \times 10^{4}\)  & \(4.427302 \times 10^{4}\) \\
+\(5.62 \times 10^{12}\)      & \(1.850594 \times 10^{4}\)  & \(1.627064 \times 10^{4}\) \\
+\(10^{13}\)                  & \(7.085128 \times 10^{3}\)  & \(6.031299 \times 10^{3}\) \\
+\(1.78 \times 10^{13}\)      & \(2.712592 \times 10^{3}\)  & \(2.295077 \times 10^{3}\) \\
+\(3.16 \times 10^{13}\)      & \(1.038535 \times 10^{3}\)  & \(9.161532 \times 10^{2}\) \\
+\(5.62 \times 10^{13}\)      & \(3.976105 \times 10^{2}\)  & \(3.732544 \times 10^{2}\) \\
+\(10^{14}\)                  & \(1.522280 \times 10^{2}\)  & \(1.519256 \times 10^{2}\) \\
+\(1.78 \times 10^{14}\)      & \(5.828156 \times 10^{1}\)  & \(6.144090 \times 10^{1}\) \\
+\(3.16 \times 10^{14}\)      & \(2.231351 \times 10^{1}\)  & \(2.450957 \times 10^{1}\) \\
+\(5.62 \times 10^{14}\)      & \(8.542885\)                & \(9.410121\) \\
+\(10^{15}\)                  & \(3.270704\)                & \(3.474206\) \\
+\(1.78 \times 10^{15}\)      & \(1.252212\)                & \(1.266900\) \\
+\(3.16 \times 10^{15}\)      & \(4.192405 \times 10^{-1}\) & \(4.492060 \times 10^{-1}\) \\
+\(5.62 \times 10^{15}\)      & \(1.356153 \times 10^{-1}\) & \(1.521651 \times 10^{-1}\) \\
+\(10^{16}\)                  & \(4.386865 \times 10^{-2}\) & \(4.952506 \times 10^{-2}\) \\
+\(1.78 \times 10^{16}\)      & \(1.419057 \times 10^{-2}\) & \(1.560381 \times 10^{-2}\) \\
+\(3.16 \times 10^{16}\)      & \(4.590345 \times 10^{-3}\) & \(4.798496 \times 10^{-3}\) \\
+\(5.62 \times 10^{16}\)      & \(1.441959 \times 10^{-3}\) & \(1.465620 \times 10^{-3}\) \\
+\(10^{17}\)                  & \(4.040115 \times 10^{-4}\) & \(4.331803 \times 10^{-4}\) \\
+\(1.78 \times 10^{17}\)      & \(1.131969 \times 10^{-4}\) & \(1.195804 \times 10^{-4}\) \\
+\(3.16 \times 10^{17}\)      & \(3.171579 \times 10^{-5}\) & \(3.248950 \times 10^{-5}\) \\
+\(5.62 \times 10^{17}\)      & \(8.886208 \times 10^{-6}\) & \(8.829719 \times 10^{-6}\) \\
+\(10^{18}\)                  & \(2.489759 \times 10^{-6}\) & \(2.406153 \times 10^{-6}\) \\
+\(1.78 \times 10^{18}\)      & \(6.975869 \times 10^{-7}\) & \(6.667173 \times 10^{-7}\) \\
+\(3.16 \times 10^{18}\)      & \(1.984655 \times 10^{-7}\) & \(1.968431 \times 10^{-7}\) \\
+\(5.62 \times 10^{18}\)      & \(6.572750 \times 10^{-8}\) & \(6.384163 \times 10^{-8}\) \\
+\(10^{19}\)                  & \(2.176753 \times 10^{-8}\) & \(2.224884 \times 10^{-8}\) \\
+\(1.78 \times 10^{19}\)      & \(7.208935 \times 10^{-9}\) & \(7.635287 \times 10^{-9}\) \\
+\(3.16 \times 10^{19}\)      & \(2.293259 \times 10^{-9}\) & \(2.344957 \times 10^{-9}\) \\
+\(5.62 \times 10^{19}\)      & \(4.892230 \times 10^{-10}\) & \(5.615768 \times 10^{-10}\) \\
+\(10^{20}\)                  & \(1.043664 \times 10^{-10}\) & \(1.043664 \times 10^{-10}\) \\
+\(1.78 \times 10^{20}\)      & \(2.226458 \times 10^{-11}\) & \(1.851705 \times 10^{-11}\) \\
+\(3.16 \times 10^{20}\)      & \(4.749722 \times 10^{-12}\) & \(7.735170 \times 10^{-13}\) \\
+\(5.62 \times 10^{20}\)      & \(1.013263 \times 10^{-12}\) & --- \\
+\(10^{21}\)                  & \(2.161603 \times 10^{-13}\) & --- \\
+\hline
+\end{tabular}
+\end{center}
+
+The rows at and above \(1.78 \times 10^{20}\,\mathrm{eV}\) extend beyond the
+formal calibration range of the analytical fit. The rows at and above
+\(5.62 \times 10^{20}\,\mathrm{eV}\) also lie beyond the tabulated CSV range, so
+those analytical values are explicit extrapolations and no exact CSV-based
+values are quoted there.
+
+\end{document}
