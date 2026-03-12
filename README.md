@@ -3,7 +3,7 @@
 This folder contains a simple workflow to estimate the cosmic-ray event rate above an energy threshold using `data.csv`.
 
 The numerical data in `data.csv` was scanned from the Wikipedia figure
-“Cosmic ray flux versus particle energy”. A local copy is included as
+"Cosmic ray flux versus particle energy". A local copy is included as
 `Cosmic_ray_flux_versus_particle_energy.svg.png`, and the original source page is:
 https://en.wikipedia.org/wiki/Cosmic_ray#/media/File:Cosmic_ray_flux_versus_particle_energy.svg
 
@@ -13,6 +13,10 @@ Files:
 - `cosmic_ray_rate.py`: exact interpolation-based integrator plus piecewise analytical approximation.
 - `rate_comparison.png`: log-log comparison of exact vs analytical rate.
 - `cosmic_ray_rate_formula.tex`: short LaTeX note with the analytical formula and a dense threshold table from `10^12` to `10^21 eV`.
+
+<p>
+  <img src="rate_comparison.png" alt="Comparison of exact and analytical cosmic-ray threshold rates" width="520">
+</p>
 
 ## Units
 

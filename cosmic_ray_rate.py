@@ -52,8 +52,8 @@ def load_spectrum(csv_path: Path) -> tuple[list[float], list[float]]:
     if len(col1) < 2:
         raise ValueError(f"No numeric data found in {csv_path}")
 
-    # The header in data.csv says "F, E", but the numeric content behaves like
-    # "E (eV), F ((m^2 sr s GeV)^-1)". Use the monotonic trend in the data.
+    # We still infer the column roles from monotonic trends so the loader stays
+    # robust even if the CSV header or column order changes.
     col1_up = all(a < b for a, b in zip(col1, col1[1:]))
     col2_up = all(a < b for a, b in zip(col2, col2[1:]))
     col1_down = all(a > b for a, b in zip(col1, col1[1:]))
