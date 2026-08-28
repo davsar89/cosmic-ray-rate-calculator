@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cosmic-ray-rate-calculator"
+version = "0.2.0"
+description = "Ideal cosmic-ray threshold-rate reference calculator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+test = ["pytest>=8.0"]
+dev = ["matplotlib>=3.7", "pytest>=8.0"]
+
+[project.scripts]
+cosmic-ray-rate = "cosmic_ray_rate:main"
+
+[tool.setuptools]
+py-modules = ["cosmic_ray_rate"]
+
+[tool.setuptools.data-files]
+"share/cosmic-ray-rate-calculator" = [
+  "data.csv",
+  "Cosmic_ray_flux_versus_particle_energy.svg.png",
+  "DATA_PROVENANCE.md",
+  "LICENSE",
+  "NOTICE",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

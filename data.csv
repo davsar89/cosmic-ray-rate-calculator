@@ -1,4 +1,6 @@
-#  E (eV),         F (m^2.sr.s.GeV)^-1
+# Digitized from Sven Lafebre, "Cosmic ray flux versus particle energy"; see DATA_PROVENANCE.md.
+# Stored decimal digits reflect digitizer output, not measurement accuracy.
+energy_eV,flux_per_m2_sr_s_GeV
 255087529.14182016, 3344.3138592484083
 431378305.9803469, 2799.238320130556
 729546320.4865341, 1975.0394971841645

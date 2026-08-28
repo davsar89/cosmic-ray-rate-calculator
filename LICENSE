@@ -1,0 +1,19 @@
+SOFTWARE LICENSE STATUS
+
+The original supplied project did not include a license for its original source
+code or original documentation. This corrective patch does not assign such a
+license or grant reuse permission on behalf of unknown copyright holders.
+
+Unless and until the relevant copyright holders add an explicit software
+license, no permission to copy, modify, or redistribute the project's original
+code or original documentation should be inferred from availability alone.
+
+Third-party and derived materials have separate terms. In particular, the
+included cosmic-ray source graphic is offered by its author under several
+licenses, and this repository records the CC BY-SA 3.0 option for the local
+rasterization and any copyrightable adaptations. See NOTICE and
+DATA_PROVENANCE.md for attribution, changes, and reuse terms.
+
+Project maintainers should replace this status notice with an appropriate
+explicit software license after confirming ownership and compatibility with the
+third-party materials.
