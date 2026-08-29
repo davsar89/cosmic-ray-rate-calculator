@@ -5,6 +5,7 @@ import bisect
 import csv
 import hashlib
 import math
+import re
 import statistics
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,14 @@ from typing import Literal, Sequence
 
 
 CSV_HEADER = ("energy_eV", "flux_per_m2_sr_s_GeV")
+MAX_SAMPLE_POINTS = 1_000_000
+
+# The CSV schema accepts plain ASCII decimal or scientific notation only.
+# Bare float() is laxer (underscores, Unicode digits, inf/nan spellings), so
+# cells are checked against this pattern first.
+_NUMERIC_CELL_RE = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z", re.ASCII
+)
 TailModel = Literal["truncate", "last-segment"]
 Geometry = Literal["flat", "hemisphere", "full_sky"]
 
@@ -168,9 +177,6 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
     except csv.Error as exc:
         raise ValueError(f"{path}:{header_line_number}: invalid CSV header: {exc}") from exc
 
-    if header and header[0].startswith("\ufeff"):
-        header = (header[0].lstrip("\ufeff"), *header[1:])
-
     if header != CSV_HEADER:
         expected = ",".join(CSV_HEADER)
         actual = ",".join(header)
@@ -190,13 +196,15 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
                 f"{path}:{line_number}: expected 2 columns, found {len(row)}"
             )
 
-        try:
-            energy_eV = float(row[0].strip())
-            flux = float(row[1].strip())
-        except ValueError as exc:
+        energy_text = row[0].strip()
+        flux_text = row[1].strip()
+        if not (_NUMERIC_CELL_RE.match(energy_text) and _NUMERIC_CELL_RE.match(flux_text)):
             raise ValueError(
-                f"{path}:{line_number}: energy and flux must be numeric"
-            ) from exc
+                f"{path}:{line_number}: energy and flux must be numeric "
+                "(plain decimal or scientific notation)"
+            )
+        energy_eV = float(energy_text)
+        flux = float(flux_text)
 
         _require_positive_finite(energy_eV, f"{path}:{line_number}: energy_eV")
         _require_positive_finite(
@@ -254,31 +262,39 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
     )
 
 
-@lru_cache(maxsize=32)
-def _load_spectrum_cached(path_string: str, mtime_ns: int, size: int) -> Spectrum:
-    # mtime_ns and size are cache-key fields. They intentionally do not appear in
-    # the body; changing either invalidates the cache entry.
-    del mtime_ns, size
-    path = Path(path_string)
-    raw_bytes = path.read_bytes()
-    digest = hashlib.sha256(raw_bytes).hexdigest()
-    try:
-        text = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{path}: CSV file must be UTF-8 text") from exc
-    return _parse_spectrum(path, text, digest)
+# Parsed spectra keyed on (resolved path, content SHA-256). Keying on the
+# content digest instead of stat metadata means a rewritten file is always
+# re-parsed, even when its size and mtime survive the rewrite.
+_SPECTRUM_CACHE_MAX_ENTRIES = 32
+_spectrum_cache: dict[tuple[str, str], Spectrum] = {}
 
 
 def load_spectrum(csv_path: Path | str = DEFAULT_CSV) -> Spectrum:
     """Load, validate, sort, and precompute a spectrum from the defined CSV schema."""
     path = Path(csv_path).expanduser().resolve()
+    if path.is_dir():
+        raise ValueError(f"Spectrum path is not a regular file: {path}")
     try:
-        stat = path.stat()
+        raw_bytes = path.read_bytes()
     except OSError as exc:
         raise ValueError(f"Could not read spectrum file {path}: {exc.strerror or exc}") from exc
-    if not path.is_file():
-        raise ValueError(f"Spectrum path is not a regular file: {path}")
-    return _load_spectrum_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+
+    key = (str(path), digest)
+    cached = _spectrum_cache.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        # utf-8-sig drops a leading BOM before comment/header filtering sees it.
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}: CSV file must be UTF-8 text") from exc
+    spectrum = _parse_spectrum(path, text, digest)
+    if len(_spectrum_cache) >= _SPECTRUM_CACHE_MAX_ENTRIES:
+        _spectrum_cache.clear()
+    _spectrum_cache[key] = spectrum
+    return spectrum
 
 
 # ---------------------------------------------------------------------------
@@ -564,7 +580,11 @@ def _approximation_matches(
     )
 
 
+@lru_cache(maxsize=1)
 def _default_approximation() -> Approximation:
+    # The bundled dataset is treated as immutable within a process; paths that
+    # depend on the dataset re-check _approximation_matches against a freshly
+    # loaded spectrum, so a mid-process edit raises instead of mismatching.
     return calibrate_piecewise_approximation(DEFAULT_CSV)
 
 
@@ -582,7 +602,17 @@ def approx_rate_above_flat_km2(
     """
     _require_positive_finite(threshold_eV, "threshold_eV")
     _require_positive_finite(area_km2, "area_km2")
-    selected = approximation or _default_approximation()
+    selected = approximation if approximation is not None else _default_approximation()
+
+    if (
+        len(selected.breaks_eV) < 2
+        or len(selected.rates_per_s_per_km2) != len(selected.breaks_eV)
+        or len(selected.exponents) != len(selected.breaks_eV) - 1
+    ):
+        raise ValueError(
+            "approximation is structurally invalid: it needs at least two breaks, "
+            "one rate per break, and one exponent per segment"
+        )
 
     if not (selected.breaks_eV[0] <= threshold_eV <= selected.breaks_eV[-1]):
         raise ValueError(
@@ -621,8 +651,11 @@ def _validate_sampling_range(
         isinstance(n_points, bool)
         or not isinstance(n_points, int)
         or n_points < 2
+        or n_points > MAX_SAMPLE_POINTS
     ):
-        raise ValueError("n_points must be an integer of at least 2")
+        raise ValueError(
+            f"n_points must be an integer between 2 and {MAX_SAMPLE_POINTS}"
+        )
     if e_min_eV < approximation.breaks_eV[0] or e_max_eV > approximation.breaks_eV[-1]:
         raise ValueError(
             "Comparison range must lie inside the approximation calibration range "
@@ -634,10 +667,15 @@ def _validate_sampling_range(
 def _log_spaced_values(e_min_eV: float, e_max_eV: float, n_points: int) -> list[float]:
     log_min = math.log10(e_min_eV)
     log_span = math.log10(e_max_eV) - log_min
-    return [
+    values = [
         10.0 ** (log_min + index * log_span / (n_points - 1))
         for index in range(n_points)
     ]
+    # 10**log10(x) can land one ulp outside [e_min_eV, e_max_eV], which would
+    # fail range checks that the caller's inputs satisfy. Pin the endpoints.
+    values[0] = e_min_eV
+    values[-1] = e_max_eV
+    return values
 
 
 def _linear_quantile(sorted_values: Sequence[float], probability: float) -> float:
@@ -676,6 +714,40 @@ def _select_approximation_for_spectrum(
     return selected
 
 
+def _sampled_rates(
+    csv_path: Path | str,
+    e_min_eV: float,
+    e_max_eV: float,
+    n_points: int,
+    tail_model: TailModel,
+    approximation: Approximation | None,
+) -> tuple[TailModel, list[tuple[float, float, float]]]:
+    """Sample (energy, reference rate, approximation rate) triples.
+
+    Shared by compare_formula and make_comparison_plot so both always use the
+    same validation and the same flat 1 km^2 reference convention.
+    """
+    normalised_tail_model = _normalise_tail_model(tail_model)
+    spectrum = load_spectrum(csv_path)
+    selected = _select_approximation_for_spectrum(
+        spectrum, normalised_tail_model, approximation
+    )
+    _validate_sampling_range(e_min_eV, e_max_eV, n_points, selected)
+
+    samples: list[tuple[float, float, float]] = []
+    for energy in _log_spaced_values(e_min_eV, e_max_eV, n_points):
+        reference = _rate_above_from_spectrum(
+            energy,
+            spectrum,
+            area_km2=1.0,
+            geometry="flat",
+            tail_model=normalised_tail_model,
+        )
+        approx = approx_rate_above_flat_km2(energy, approximation=selected)
+        samples.append((energy, reference, approx))
+    return normalised_tail_model, samples
+
+
 def compare_formula(
     csv_path: Path | str = DEFAULT_CSV,
     e_min_eV: float = 1.0e10,
@@ -690,28 +762,12 @@ def compare_formula(
     Thresholds are uniformly spaced in log10(E). These are sampled statistics,
     not mathematical global bounds.
     """
-    normalised_tail_model = _normalise_tail_model(tail_model)
-    spectrum = load_spectrum(csv_path)
-    selected = _select_approximation_for_spectrum(
-        spectrum, normalised_tail_model, approximation
+    _, samples = _sampled_rates(
+        csv_path, e_min_eV, e_max_eV, n_points, tail_model, approximation
     )
-    _validate_sampling_range(e_min_eV, e_max_eV, n_points, selected)
-
-    rel_errors: list[float] = []
-    for energy in _log_spaced_values(e_min_eV, e_max_eV, n_points):
-        reference = _rate_above_from_spectrum(
-            energy,
-            spectrum,
-            area_km2=1.0,
-            geometry="flat",
-            tail_model=normalised_tail_model,
-        )
-        approx = approx_rate_above_flat_km2(
-            energy, approximation=selected
-        )
-        rel_errors.append(abs(approx / reference - 1.0))
-
-    rel_errors.sort()
+    rel_errors = sorted(
+        abs(approx / reference - 1.0) for _, reference, approx in samples
+    )
     return (
         statistics.median(rel_errors),
         _linear_quantile(rel_errors, 0.95),
@@ -740,32 +796,15 @@ def make_comparison_plot(
             "Plotting requires Matplotlib; install the project with the 'plot' extra"
         ) from exc
 
-    normalised_tail_model = _normalise_tail_model(tail_model)
-    spectrum = load_spectrum(csv_path)
-    selected = _select_approximation_for_spectrum(
-        spectrum, normalised_tail_model, approximation
+    normalised_tail_model, samples = _sampled_rates(
+        csv_path, e_min_eV, e_max_eV, n_points, tail_model, approximation
     )
-    _validate_sampling_range(e_min_eV, e_max_eV, n_points, selected)
-
-    energies = _log_spaced_values(e_min_eV, e_max_eV, n_points)
-    reference_rates: list[float] = []
-    approx_rates: list[float] = []
-    rel_errors_pct: list[float] = []
-
-    for energy in energies:
-        reference = _rate_above_from_spectrum(
-            energy,
-            spectrum,
-            area_km2=1.0,
-            geometry="flat",
-            tail_model=normalised_tail_model,
-        )
-        approx = approx_rate_above_flat_km2(
-            energy, approximation=selected
-        )
-        reference_rates.append(reference)
-        approx_rates.append(approx)
-        rel_errors_pct.append(100.0 * (approx / reference - 1.0))
+    energies = [energy for energy, _, _ in samples]
+    reference_rates = [reference for _, reference, _ in samples]
+    approx_rates = [approx for _, _, approx in samples]
+    rel_errors_pct = [
+        100.0 * (approx / reference - 1.0) for _, reference, approx in samples
+    ]
 
     fig, (ax_top, ax_bottom) = plt.subplots(
         2,
@@ -819,13 +858,15 @@ def _positive_float_argument(value: str) -> float:
     return parsed
 
 
-def _integer_at_least_two(value: str) -> int:
+def _check_points_argument(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < 2:
-        raise argparse.ArgumentTypeError("must be at least 2")
+    if not 2 <= parsed <= MAX_SAMPLE_POINTS:
+        raise argparse.ArgumentTypeError(
+            f"must be between 2 and {MAX_SAMPLE_POINTS}"
+        )
     return parsed
 
 
@@ -895,7 +936,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check-points",
-        type=_integer_at_least_two,
+        type=_check_points_argument,
         default=10_001,
         help="Number of log-spaced thresholds used by --check-formula (default: 10001)",
     )
