@@ -6,8 +6,10 @@ import csv
 import hashlib
 import math
 import re
+import site
 import statistics
 import sys
+import sysconfig
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -41,13 +43,31 @@ APPROX_BREAKS_EV = (
 
 
 def _find_default_csv() -> Path:
-    """Find data.csv both in a source checkout and in an installed package."""
-    source_tree_path = Path(__file__).with_name("data.csv")
-    if source_tree_path.is_file():
-        return source_tree_path
+    """Find data.csv in a source checkout or in known install data locations.
 
-    installed_path = Path(sys.prefix) / "share" / "cosmic-ray-rate-calculator" / "data.csv"
-    return installed_path
+    Wheel data-files land in the active install scheme's data root, which is
+    sys.prefix only for venv-style installs; user and system schemes differ,
+    so several candidates are checked.
+    """
+    source_tree_path = Path(__file__).with_name("data.csv")
+    share_suffix = Path("share") / "cosmic-ray-rate-calculator" / "data.csv"
+
+    candidates = [source_tree_path]
+    data_root = sysconfig.get_path("data")
+    if data_root:
+        candidates.append(Path(data_root) / share_suffix)
+    try:
+        user_base = site.getuserbase()
+    except (AttributeError, OSError):
+        user_base = None
+    if user_base:
+        candidates.append(Path(user_base) / share_suffix)
+    candidates.append(Path(sys.prefix) / share_suffix)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return source_tree_path
 
 
 DEFAULT_CSV = _find_default_csv()
@@ -522,6 +542,23 @@ def _validate_breaks(
     return breaks
 
 
+def _derive_default_breaks(spectrum: Spectrum, tail_model: TailModel) -> tuple[float, ...]:
+    """Restrict APPROX_BREAKS_EV to break energies the dataset can support."""
+    breaks = tuple(
+        value
+        for value in APPROX_BREAKS_EV
+        if value >= spectrum.min_energy_eV
+        and (tail_model != "truncate" or value < spectrum.max_energy_eV)
+    )
+    if len(breaks) < 2:
+        raise ValueError(
+            "The dataset energy range is too narrow for the built-in "
+            "approximation break points; supply explicit break energies "
+            "with --approx-breaks-ev"
+        )
+    return breaks
+
+
 @lru_cache(maxsize=32)
 def _calibrate_approximation_cached(
     spectrum: Spectrum,
@@ -858,6 +895,30 @@ def _positive_float_argument(value: str) -> float:
     return parsed
 
 
+def _breaks_argument(value: str) -> tuple[float, ...]:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) < 2:
+        raise argparse.ArgumentTypeError(
+            "must list at least two comma-separated energies"
+        )
+    breaks: list[float] = []
+    for part in parts:
+        try:
+            parsed = float(part)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "must be comma-separated numbers"
+            ) from exc
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            raise argparse.ArgumentTypeError(
+                "energies must be finite and greater than zero"
+            )
+        breaks.append(parsed)
+    if any(left >= right for left, right in zip(breaks, breaks[1:])):
+        raise argparse.ArgumentTypeError("energies must be strictly increasing")
+    return tuple(breaks)
+
+
 def _check_points_argument(value: str) -> int:
     try:
         parsed = int(value)
@@ -928,6 +989,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--approx-breaks-ev",
+        type=_breaks_argument,
+        default=None,
+        metavar="E1,E2,...",
+        help=(
+            "Comma-separated, strictly increasing break energies in eV for "
+            "--recalibrate-approximation (default: built-in breaks, restricted "
+            "to the dataset range when necessary)"
+        ),
+    )
+    parser.add_argument(
         "--check-formula",
         action="store_true",
         help=(
@@ -957,24 +1029,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         parser.error("--aperture-m2-sr cannot be combined with --area-km2 or --geometry")
 
+    if args.approx_breaks_ev is not None and not args.recalibrate_approximation:
+        parser.error("--approx-breaks-ev requires --recalibrate-approximation")
+
     area_km2 = args.area_km2 if args.area_km2 is not None else 1.0
     geometry: Geometry = args.geometry if args.geometry is not None else "flat"
     tail_model: TailModel = args.tail_model
 
     try:
         spectrum = load_spectrum(args.csv)
-        default_spectrum = load_spectrum(DEFAULT_CSV)
 
         approximation: Approximation | None = None
         if args.recalibrate_approximation:
+            if args.approx_breaks_ev is not None:
+                breaks_eV = args.approx_breaks_ev
+            else:
+                breaks_eV = _derive_default_breaks(spectrum, tail_model)
+                if breaks_eV != APPROX_BREAKS_EV:
+                    print(
+                        "Note: approximation break points restricted to the "
+                        "dataset range: "
+                        + ", ".join(f"{value:.6g}" for value in breaks_eV)
+                        + " eV"
+                    )
             approximation = calibrate_piecewise_approximation(
-                args.csv, tail_model=tail_model
+                args.csv, breaks_eV=breaks_eV, tail_model=tail_model
             )
-        elif (
-            spectrum.dataset_sha256 == default_spectrum.dataset_sha256
-            and tail_model == "truncate"
-        ):
-            approximation = _default_approximation()
+        else:
+            # The bundled approximation applies only when the selected dataset
+            # and tail model match it; a missing/broken bundled data.csv just
+            # means no shortcut is available, not a hard failure.
+            try:
+                candidate = _default_approximation()
+            except (OSError, ValueError):
+                candidate = None
+            if candidate is not None and _approximation_matches(
+                candidate, spectrum, tail_model
+            ):
+                approximation = candidate
 
         if args.aperture_m2_sr is not None:
             reference_rate = rate_above_from_aperture(

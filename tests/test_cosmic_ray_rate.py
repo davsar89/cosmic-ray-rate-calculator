@@ -295,6 +295,72 @@ def test_cli_does_not_silently_use_default_fit_for_custom_data(tmp_path: Path) -
     assert "recalibrate-approximation" in completed.stdout
 
 
+def test_cli_survives_missing_default_csv_with_custom_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    default = crr.load_spectrum()
+    custom = write_spectrum(
+        tmp_path / "scaled.csv",
+        [
+            (energy, 2.0 * flux)
+            for energy, flux in zip(
+                default.energies_eV, default.fluxes_per_m2_sr_s_GeV
+            )
+        ],
+    )
+    monkeypatch.setattr(crr, "DEFAULT_CSV", tmp_path / "missing.csv")
+    crr._default_approximation.cache_clear()
+
+    assert crr.main(["1e15", "--csv", str(custom)]) == 0
+    assert "Approximation             : n/a" in capsys.readouterr().out
+
+    assert (
+        crr.main(["1e15", "--csv", str(custom), "--recalibrate-approximation"])
+        == 0
+    )
+    assert "Piecewise approximation" in capsys.readouterr().out
+
+
+def test_cli_recalibrates_narrow_dataset_with_derived_breaks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    custom = write_spectrum(
+        tmp_path / "narrow.csv",
+        [(1.0e11, 1.0e-2), (1.0e15, 1.0e-10), (1.0e19, 1.0e-20)],
+    )
+
+    assert (
+        crr.main(["1e15", "--csv", str(custom), "--recalibrate-approximation"])
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Note: approximation break points restricted" in output
+    assert "Piecewise approximation" in output
+
+    assert (
+        crr.main(
+            [
+                "1e13",
+                "--csv",
+                str(custom),
+                "--recalibrate-approximation",
+                "--approx-breaks-ev",
+                "1e12,1e14,1e16",
+            ]
+        )
+        == 0
+    )
+    assert "Piecewise approximation" in capsys.readouterr().out
+
+
+def test_cli_breaks_flag_requires_recalibration() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        crr.main(["1e15", "--approx-breaks-ev", "1e12,1e14"])
+    assert excinfo.value.code == 2
+
+
 def test_cli_formula_check_needs_a_matching_approximation(tmp_path: Path) -> None:
     custom = write_spectrum(
         tmp_path / "small.csv",
