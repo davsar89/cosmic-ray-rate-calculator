@@ -10,6 +10,10 @@ This project estimates an **ideal cosmic-ray crossing rate** above an energy thr
 
 The calculation is a geometric flux estimate, not a complete detector simulation. See [Scientific scope and limitations](#scientific-scope-and-limitations) and [DATA_PROVENANCE.md](DATA_PROVENANCE.md).
 
+<p>
+  <img src="rate_comparison.png" alt="Comparison of the CSV-truncated reference rate and the calibrated piecewise power-law approximation" width="520">
+</p>
+
 ## Installation
 
 Python 3.10 or newer is required.
