@@ -8,8 +8,10 @@ measurement uncertainty.
 
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
+from typing import Sequence
 
 from cosmic_ray_rate import (
     APPROX_BREAKS_EV,
@@ -103,7 +105,9 @@ def _write_approximation_fragment(approximation: Approximation) -> None:
             "",
         ]
     )
-    APPROXIMATION_TEX.write_text(text, encoding="utf-8")
+    # newline="\n" keeps the committed fragment byte-identical across
+    # platforms; CI diffs it against a fresh regeneration.
+    APPROXIMATION_TEX.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _write_rate_table_fragment(approximation: Approximation) -> None:
@@ -134,10 +138,20 @@ def _write_rate_table_fragment(approximation: Approximation) -> None:
         )
 
     rows.extend([r"\hline", r"\end{tabular}", r"\end{center}", ""])
-    RATE_TABLE_TEX.write_text("\n".join(rows), encoding="utf-8")
+    RATE_TABLE_TEX.write_text("\n".join(rows), encoding="utf-8", newline="\n")
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Regenerate the LaTeX fragments and comparison plot."
+    )
+    parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Regenerate only the LaTeX fragments (does not require Matplotlib)",
+    )
+    args = parser.parse_args(argv)
+
     spectrum = load_spectrum(DEFAULT_CSV)
     approximation = calibrate_piecewise_approximation(
         DEFAULT_CSV,
@@ -147,18 +161,20 @@ def main() -> int:
 
     _write_approximation_fragment(approximation)
     _write_rate_table_fragment(approximation)
-    make_comparison_plot(
-        PLOT_PATH,
-        csv_path=DEFAULT_CSV,
-        approximation=approximation,
-        tail_model="truncate",
-    )
+    if not args.skip_plot:
+        make_comparison_plot(
+            PLOT_PATH,
+            csv_path=DEFAULT_CSV,
+            approximation=approximation,
+            tail_model="truncate",
+        )
 
     print(f"Dataset rows        : {len(spectrum.energies_eV)}")
     print(f"Dataset SHA-256     : {spectrum.dataset_sha256}")
     print(f"Wrote               : {APPROXIMATION_TEX.name}")
     print(f"Wrote               : {RATE_TABLE_TEX.name}")
-    print(f"Wrote               : {PLOT_PATH.name}")
+    if not args.skip_plot:
+        print(f"Wrote               : {PLOT_PATH.name}")
     return 0
 
 

@@ -11,3 +11,6 @@ dist/
 *.log
 *.out
 *.synctex.gz
+
+# Machine-local agent notes (GitHub account / SSH key mapping); never publish.
+AGENTS.md

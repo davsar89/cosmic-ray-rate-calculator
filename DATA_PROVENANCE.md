@@ -88,4 +88,6 @@ python cosmic_ray_rate.py 1e15 \
   --check-formula
 ```
 
+If the replacement spectrum does not span the built-in approximation break points, recalibration restricts them to the dataset's energy range and prints a note; explicit break energies can be supplied with `--approx-breaks-ev`.
+
 A scientifically stronger replacement should cite a primary source, preserve reported uncertainties, describe any unit conversions, and record a reproducible transformation from the source data to this CSV schema.

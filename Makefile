@@ -3,7 +3,7 @@ PDFLATEX ?= pdflatex
 SOURCE_DATE_EPOCH ?= 1773333791
 export SOURCE_DATE_EPOCH
 
-.PHONY: test generate pdf artifacts clean
+.PHONY: test generate fragments pdf artifacts clean
 
 test:
 	$(PYTHON) -m pytest
@@ -11,7 +11,10 @@ test:
 generate:
 	$(PYTHON) generate_artifacts.py
 
-pdf: generate
+fragments:
+	$(PYTHON) generate_artifacts.py --skip-plot
+
+pdf: fragments
 	$(PDFLATEX) -interaction=nonstopmode -halt-on-error cosmic_ray_rate_formula.tex
 	$(PDFLATEX) -interaction=nonstopmode -halt-on-error cosmic_ray_rate_formula.tex
 
