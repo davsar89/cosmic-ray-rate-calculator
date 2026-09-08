@@ -13,7 +13,6 @@ dependencies = []
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]
 test = ["pytest>=8.0"]
-dev = ["matplotlib>=3.7", "pytest>=8.0"]
 
 [project.scripts]
 cosmic-ray-rate = "cosmic_ray_rate:main"

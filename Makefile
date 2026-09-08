@@ -1,7 +1,5 @@
 PYTHON ?= python
 PDFLATEX ?= pdflatex
-SOURCE_DATE_EPOCH ?= 1773333791
-export SOURCE_DATE_EPOCH
 
 .PHONY: test generate fragments pdf artifacts clean
 
@@ -19,6 +17,7 @@ pdf: fragments
 	$(PDFLATEX) -interaction=nonstopmode -halt-on-error cosmic_ray_rate_formula.tex
 
 artifacts: pdf
+	$(PYTHON) generate_artifacts.py
 
 clean:
 	rm -f \

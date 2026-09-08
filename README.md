@@ -1,11 +1,11 @@
 # Cosmic Ray Flux Threshold Rate
 
-This project estimates an **ideal cosmic-ray crossing rate** above an energy threshold from the tabulated spectrum in `data.csv`. It provides:
+This project estimates an **ideal primary cosmic-ray crossing rate** above an incident-particle energy threshold from the tabulated spectrum in `data.csv`. It provides:
 
 - a validated CSV loader and analytic integration of log-log power-law segments;
 - an explicitly defined finite-range reference calculation;
 - an optional, clearly labeled high-energy tail extrapolation;
-- a piecewise power-law approximation calibrated to a selected dataset;
+- a continuous, five-piece power-law approximation calibrated to a selected dataset;
 - reproducible tests, plot generation, and a LaTeX formula note.
 
 The calculation is a geometric flux estimate, not a complete detector simulation. See [Scientific scope and limitations](#scientific-scope-and-limitations) and [DATA_PROVENANCE.md](DATA_PROVENANCE.md).
@@ -50,8 +50,8 @@ Typical output is deliberately limited to a modest number of significant figures
 
 ```text
 CSV-truncated reference rate: 3.47421 events / s
-Piecewise approximation   : 3.2707 events / s
-Sample-point relative error: 5.858 %
+Piecewise approximation   : 3.08073 events / s
+Sample-point relative error: 11.326 %
 ```
 
 Use another ideal flat area:
@@ -94,7 +94,7 @@ python cosmic_ray_rate.py 1e20 \
 
 ## Approximation checks
 
-The default piecewise approximation is tied to the numeric contents of the bundled `data.csv`, the `truncate` tail convention, and break points from `10^10` through `10^20 eV`.
+The default approximation has five power-law pieces from `10^10` through `10^20 eV`, tied to the bundled `data.csv` and the `truncate` tail convention. Its rounded breakpoints were selected against this reference. Calibration fits log-rates at each interval's endpoints and logarithmic quarter points, counting shared endpoints once. A small tridiagonal least-squares solve shares breakpoint rates between pieces to enforce continuity; rates need not equal the reference at the breakpoints. Fits that increase with energy are rejected.
 
 Print sampled error statistics and regenerate the comparison plot:
 
@@ -104,7 +104,9 @@ python cosmic_ray_rate.py 1e15 \
   --plot rate_comparison.png
 ```
 
-The reported median, 95th percentile, and worst error are sampled at thresholds uniformly spaced in `log10(E)`. They are not mathematical global bounds. The default check uses 10,001 thresholds; this can be changed with `--check-points`.
+The five-piece fit has about 5.33% median, 14.58% 95th-percentile, and 17.03% worst sampled error relative to the CSV integral. The previous six-piece fit had 5.43%, 16.06%, and 18.44%, respectively, over the same range. Individual thresholds can still have larger errors than before. Prefer the reference calculation for numerical work; the fit is a compact formula for hand estimates. These errors measure the shortcut's accuracy, not physical uncertainty in the spectrum.
+
+Checks and plots span the selected approximation's calibration range, with thresholds uniformly spaced in `log10(E)`. The statistics are not mathematical global bounds. The default check uses 10,001 thresholds; this can be changed with `--check-points`.
 
 A custom CSV is never silently compared with coefficients calibrated to different data. Recalibrate explicitly:
 
@@ -141,7 +143,7 @@ The interpreted units are:
 
 ## Angular and detector assumptions
 
-For `--geometry flat`, the rate uses the projected factor `pi * A` for an ideal one-sided horizontal surface exposed to an isotropic downward intensity.
+For `--geometry flat`, the rate uses the projected factor `pi * A` for an ideal one-sided horizontal surface exposed to an isotropic downward intensity. This follows from integrating `cos(theta) dOmega` over the downward hemisphere. For an area in km² and energy in eV, the rate in events/s is `pi * area_km2 * 1e-3 * integral F(E) dE`: the factor combines `1e6 m²/km²` with `1e-9 GeV/eV`.
 
 The `hemisphere` and `full_sky` choices instead treat the supplied area as direction-independent and integrate it over `2*pi` or `4*pi sr`. They are effective-aperture conventions and are **not** the projected geometry of an ordinary flat detector.
 
@@ -150,6 +152,10 @@ The project does not model detector efficiency, dead time, trigger/reconstructio
 ## Scientific scope and limitations
 
 `data.csv` was digitized from the included plot `Cosmic_ray_flux_versus_particle_energy.svg.png`. The original archive did not include a digitization script, source coordinates, point uncertainties, or a primary experimental table. The many stored decimal places are digitizer output and must not be interpreted as measurement precision.
+
+The [source graphic](https://commons.wikimedia.org/wiki/File:Cosmic_ray_flux_versus_particle_energy.svg) describes incident cosmic rays at the top of the atmosphere. This is not a ground-level muon, radiation-dose, or deposited-energy model. Its energy axis does not specify kinetic versus total particle energy, and it supplies no species breakdown. The code uses the plotted particle-energy coordinate; it cannot convert an energy-per-nucleon or rigidity spectrum without additional composition data. The distinction between these variables is discussed in the [PDG cosmic-ray review, section 30.1](https://pdg.lbl.gov/2025/reviews/rpp2025-rev-cosmic-rays.pdf).
+
+Low-energy results depend on solar modulation and geomagnetic cutoffs; the bundled curve has no site or epoch specification. An isotropic, site-independent calculation is therefore only an illustrative convention, especially below about 10 GeV. See [PDG 2022, section 30.1](https://pdgaws.lbl.gov/2022/reviews/rpp2022-rev-cosmic-rays.pdf).
 
 The phrase **CSV-truncated reference** is used instead of “exact.” The segment integrals are analytic for the chosen log-log interpolation, but the underlying plotted spectrum and the unknown high-energy tail remain approximate.
 
@@ -190,13 +196,13 @@ make artifacts
 
 - `cosmic_ray_rate.py`: validated loader, integration, acceptance helpers, approximation, plotting, and CLI.
 - `data.csv`: digitized differential spectrum using the documented schema.
-- `DATA_PROVENANCE.md`: source history, attribution, checksums, and data limitations.
+- `DATA_PROVENANCE.md`: source history, attribution, and data limitations.
 - `NOTICE`: concise third-party attribution and the selected source-image license.
 - `generate_artifacts.py`: regenerates approximation/table fragments and `rate_comparison.png`.
 - `cosmic_ray_rate_formula.tex`: formula note that includes the generated fragments.
 - `generated_approximation.tex`, `generated_rate_table.tex`: `\input{}` fragments regenerated by `generate_artifacts.py`.
 - `Makefile`: `make test`, `make generate`, `make fragments`, `make pdf`, `make artifacts` targets.
-- `tests/`: regression, validation, tail-model, custom-data, and CLI tests.
+- `tests/`: analytic power laws, rate derivatives, endpoints, custom-data, and CLI tests.
 - `pyproject.toml`: Python version, optional dependencies, command entry point, and test configuration.
 
 ## License status

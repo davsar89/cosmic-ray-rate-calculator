@@ -4,6 +4,7 @@ import math
 import os
 import subprocess
 import sys
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ def write_spectrum(
     return path
 
 
-def test_default_spectrum_loads_and_is_identified() -> None:
+def test_default_spectrum_loads() -> None:
     spectrum = crr.load_spectrum()
 
     assert len(spectrum.energies_eV) == 74
@@ -36,17 +37,37 @@ def test_default_spectrum_loads_and_is_identified() -> None:
         left < right
         for left, right in zip(spectrum.energies_eV, spectrum.energies_eV[1:])
     )
-    assert len(spectrum.source_sha256) == 64
-    assert len(spectrum.dataset_sha256) == 64
 
 
-def test_reference_rate_regression_and_modest_approximation() -> None:
+def test_reference_rate_regression_and_approximation() -> None:
     reference = crr.rate_above(1.0e15)
     approximation = crr.approx_rate_above_flat_km2(1.0e15)
 
     assert reference == pytest.approx(3.4742062203714448, rel=1.0e-11)
-    assert approximation == pytest.approx(3.270704256220338, rel=1.0e-11)
-    assert abs(approximation / reference - 1.0) < 0.06
+    assert abs(approximation / reference - 1.0) < 0.18
+
+
+def test_calibration_recovers_a_power_law(tmp_path: Path) -> None:
+    # F(E) = (E/GeV)^-2; its infinite integral is (E/GeV)^-1.
+    path = write_spectrum(tmp_path / "power.csv", [(1e9, 1.0), (1e11, 1e-4)])
+    approximation = crr.calibrate_piecewise_approximation(
+        path, breaks_eV=(1e9, 3e9, 1e10, 1e11), tail_model="last-segment"
+    )
+    assert approximation.exponents == pytest.approx([1.0] * 3, rel=1e-12)
+    for threshold in (1e9, 2e9, 3e9, 5e10, 1e11):
+        expected = math.pi * 1e6 * (1e9 / threshold)
+        actual = crr.approx_rate_above_flat_km2(threshold, approximation=approximation)
+        assert actual == pytest.approx(expected, rel=1e-12, abs=0.0)
+
+
+def test_default_fit_is_continuous_and_decreasing() -> None:
+    approximation = crr.calibrate_piecewise_approximation()
+    assert len(approximation.exponents) == 5
+    assert all(exponent > 0.0 for exponent in approximation.exponents)
+    for energy in approximation.breaks_eV[1:-1]:
+        left = crr.approx_rate_above_flat_km2(math.nextafter(energy, 0.0))
+        right = crr.approx_rate_above_flat_km2(energy)
+        assert left == pytest.approx(right, rel=1e-12, abs=0.0)
 
 
 def test_power_law_integral_and_explicit_tail(tmp_path: Path) -> None:
@@ -62,8 +83,54 @@ def test_power_law_integral_and_explicit_tail(tmp_path: Path) -> None:
     )
 
     # Integral in eV is 1/E_th - 1/E_max; multiply by 1e-9 for dE_GeV.
-    assert truncated == pytest.approx(4.0e-19, rel=1.0e-11)
-    assert extrapolated == pytest.approx(5.0e-19, rel=1.0e-11)
+    assert truncated == pytest.approx(4.0e-19, rel=1.0e-11, abs=0.0)
+    assert extrapolated == pytest.approx(5.0e-19, rel=1.0e-11, abs=0.0)
+
+
+@pytest.mark.parametrize("gamma", [-3.7, -2.0, -1.0000000001, -1.0, -0.9999999999, 0.0, 2.0])
+def test_power_laws_against_high_precision_integrals(tmp_path: Path, gamma: float) -> None:
+    # F(E) = (E / GeV)**gamma per m^2 sr s GeV on [1, 100] GeV.
+    path = write_spectrum(tmp_path / "power.csv", [(1e9, 1.0), (1e11, 100.0**gamma)])
+    with localcontext() as ctx:
+        ctx.prec = 60
+        q = Decimal(str(gamma)) + 1
+        for threshold_GeV in (1.0, 2.5, 10.0, 99.0):
+            low, high = Decimal(str(threshold_GeV)), Decimal(100)
+            expected = (high / low).ln() if q == 0 else (high**q - low**q) / q
+            actual = crr.integrated_intensity_above(threshold_GeV * 1e9, path)
+            assert actual == pytest.approx(float(expected), rel=1e-12, abs=0.0)
+        if gamma < -1.0:
+            # Above the table, the infinite-tail integral has a known slope.
+            expected_tail = float(-(Decimal(200)**q) / q)
+            actual = crr.integrated_intensity_above(2e11, path, tail_model="last-segment")
+            # Near -1 the tail is ill-conditioned against rounding the input flux.
+            tolerance = 1e-5 if abs(gamma + 1) < 1e-8 else 1e-12
+            assert actual == pytest.approx(expected_tail, rel=tolerance, abs=0.0)
+        else:
+            with pytest.raises(ValueError, match="does not converge"):
+                crr.integrated_intensity_above(2e11, path, tail_model="last-segment")
+
+
+def test_integral_resolves_last_float_below_endpoint() -> None:
+    spectrum = crr.load_spectrum()
+    upper = spectrum.max_energy_eV
+    lower = math.nextafter(upper, 0.0)
+    # Over one ulp the flux is constant to floating-point precision.
+    expected = spectrum.fluxes_per_m2_sr_s_GeV[-1] * (upper - lower) * 1e-9
+    assert crr.integrated_intensity_above(lower) == pytest.approx(expected, rel=1e-12, abs=0.0)
+
+
+def test_rate_is_continuous_decreasing_and_has_the_correct_derivative() -> None:
+    spectrum = crr.load_spectrum()
+    thresholds = crr._log_spaced_values(spectrum.min_energy_eV, spectrum.max_energy_eV, 101)
+    rates = [crr.rate_above(e) for e in thresholds]
+    assert all(left > right for left, right in zip(rates, rates[1:]))
+    for i, energy in enumerate(spectrum.energies_eV[1:-1], start=1):
+        delta = energy * 1e-6
+        left, right = crr.rate_above(energy - delta), crr.rate_above(energy + delta)
+        flux = spectrum.fluxes_per_m2_sr_s_GeV[i]
+        # Fundamental theorem: dR/dE_eV = -pi * 10^-3 * F(E) for 1 km^2.
+        assert (left - right) / (2 * delta) == pytest.approx(math.pi * 1e-3 * flux, rel=1e-5, abs=0.0)
 
 
 def test_csv_endpoint_is_zero_only_for_the_truncated_definition() -> None:
@@ -76,7 +143,7 @@ def test_csv_endpoint_is_zero_only_for_the_truncated_definition() -> None:
     endpoint_tail = crr.rate_above(
         spectrum.max_energy_eV, tail_model="last-segment"
     )
-    assert endpoint_tail == pytest.approx(5.193586955416152e-12, rel=1.0e-11)
+    assert endpoint_tail == pytest.approx(5.193586955416152e-12, rel=1.0e-11, abs=0.0)
     assert crr.rate_above(1.0e20, tail_model="last-segment") > crr.rate_above(1.0e20)
 
 
@@ -90,7 +157,7 @@ def test_nonconvergent_last_segment_is_rejected(tmp_path: Path) -> None:
         crr.integrated_intensity_above(2.0, csv_path, tail_model="last-segment")
 
 
-def test_loader_uses_schema_sorts_rows_and_hashes_numeric_content(tmp_path: Path) -> None:
+def test_loader_uses_schema_and_sorts_rows(tmp_path: Path) -> None:
     rows = [(1.0, 10.0), (2.0, 4.0), (4.0, 1.0)]
     first = write_spectrum(tmp_path / "first.csv", rows, comments=("first",))
     second = write_spectrum(
@@ -102,8 +169,7 @@ def test_loader_uses_schema_sorts_rows_and_hashes_numeric_content(tmp_path: Path
 
     assert spectrum_b.energies_eV == (1.0, 2.0, 4.0)
     assert spectrum_b.fluxes_per_m2_sr_s_GeV == (10.0, 4.0, 1.0)
-    assert spectrum_a.dataset_sha256 == spectrum_b.dataset_sha256
-    assert spectrum_a.source_sha256 != spectrum_b.source_sha256
+    assert spectrum_a == spectrum_b
 
 
 @pytest.mark.parametrize(
@@ -117,6 +183,7 @@ def test_loader_uses_schema_sorts_rows_and_hashes_numeric_content(tmp_path: Path
         ("energy_eV,flux_per_m2_sr_s_GeV\n1_0,2.5\n2,1\n", "must be numeric"),
         ("energy_eV,flux_per_m2_sr_s_GeV\n١٢e12,3.0\n2,1\n", "must be numeric"),
         ("energy_eV,flux_per_m2_sr_s_GeV\n1,infinity\n2,1\n", "must be numeric"),
+        ('energy_eV,flux_per_m2_sr_s_GeV\n1,"2\n2,1\n', "invalid CSV row"),
     ],
 )
 def test_loader_rejects_invalid_csv(tmp_path: Path, contents: str, message: str) -> None:
@@ -150,7 +217,7 @@ def test_cache_serves_new_content_after_same_size_same_mtime_rewrite(
     first = crr.load_spectrum(path)
     stat = path.stat()
 
-    # Same byte length, same mtime: only the content digest can tell them apart.
+    # Filesystem metadata must not determine which physical spectrum is used.
     path.write_text(f"{header}\n1.0,6.0\n2.0,3.0\n", encoding="utf-8")
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     second = crr.load_spectrum(path)
@@ -183,7 +250,7 @@ def test_structurally_invalid_approximation_raises_value_error() -> None:
         breaks_eV=(),
         rates_per_s_per_km2=(),
         exponents=(),
-        dataset_sha256="",
+        spectrum=crr.load_spectrum(),
         tail_model="truncate",
     )
 
@@ -250,12 +317,15 @@ def test_comparison_requires_a_bounded_integer_sample_count(n_points: object) ->
         crr.compare_formula(n_points=n_points)  # type: ignore[arg-type]
 
 
-def test_sampled_error_statistics_are_stable() -> None:
-    median, p95, worst = crr.compare_formula(n_points=10_001)
-
-    assert median == pytest.approx(0.05432772591326118, rel=1.0e-9)
-    assert p95 == pytest.approx(0.16064658920893193, rel=1.0e-9)
-    assert worst == pytest.approx(0.1844041319664258, rel=1.0e-9)
+def test_sampled_error_statistics_converge() -> None:
+    coarse = crr.compare_formula(n_points=1_001)
+    fine = crr.compare_formula(n_points=10_001)
+    # At least the previous six-piece fit's accuracy, across the same range.
+    assert 0.0 <= fine[0] <= fine[1] <= fine[2]
+    assert fine[0] < 0.0544
+    assert fine[1] < 0.15
+    assert fine[2] < 0.18
+    assert coarse == pytest.approx(fine, abs=0.002)
 
 
 def test_cli_reports_invalid_input_without_a_traceback() -> None:
@@ -267,8 +337,15 @@ def test_cli_reports_invalid_input_without_a_traceback() -> None:
     )
 
     assert completed.returncode == 2
-    assert "must be finite and greater than zero" in completed.stderr
+    assert "greater than zero" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+def test_cli_rejects_underflow_without_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        crr.main(["1e20", "--area-km2", "1e-320"])
+    assert excinfo.value.code == 2
+    assert "floating-point range" in capsys.readouterr().err
 
 
 def test_cli_does_not_silently_use_default_fit_for_custom_data(tmp_path: Path) -> None:
@@ -311,7 +388,6 @@ def test_cli_survives_missing_default_csv_with_custom_data(
         ],
     )
     monkeypatch.setattr(crr, "DEFAULT_CSV", tmp_path / "missing.csv")
-    crr._default_approximation.cache_clear()
 
     assert crr.main(["1e15", "--csv", str(custom)]) == 0
     assert "Approximation             : n/a" in capsys.readouterr().out
@@ -332,12 +408,13 @@ def test_cli_recalibrates_narrow_dataset_with_derived_breaks(
     )
 
     assert (
-        crr.main(["1e15", "--csv", str(custom), "--recalibrate-approximation"])
+        crr.main(["1e15", "--csv", str(custom), "--recalibrate-approximation", "--check-formula"])
         == 0
     )
     output = capsys.readouterr().out
     assert "Note: approximation break points restricted" in output
     assert "Piecewise approximation" in output
+    assert "Sampled formula error" in output
 
     assert (
         crr.main(
@@ -348,11 +425,30 @@ def test_cli_recalibrates_narrow_dataset_with_derived_breaks(
                 "--recalibrate-approximation",
                 "--approx-breaks-ev",
                 "1e12,1e14,1e16",
+                "--check-formula",
             ]
         )
         == 0
     )
     assert "Piecewise approximation" in capsys.readouterr().out
+
+
+def test_default_approximation_tracks_edits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spectrum = crr.load_spectrum()
+    rows = list(zip(spectrum.energies_eV, spectrum.fluxes_per_m2_sr_s_GeV))
+    path = write_spectrum(tmp_path / "default.csv", rows)
+    monkeypatch.setattr(crr, "DEFAULT_CSV", path)
+    before = crr.approx_rate_above_flat_km2(1e15)
+    write_spectrum(path, [(e, 2 * f) for e, f in rows])
+    assert crr.approx_rate_above_flat_km2(1e15) == pytest.approx(2 * before)
+
+
+def test_narrow_calibration_plot(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    approximation = crr.calibrate_piecewise_approximation(breaks_eV=(1e12, 1e14, 1e16))
+    output = tmp_path / "comparison.png"
+    crr.make_comparison_plot(output, approximation=approximation, n_points=51)
+    assert output.is_file()
 
 
 def test_cli_breaks_flag_requires_recalibration() -> None:

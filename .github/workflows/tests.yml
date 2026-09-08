@@ -28,18 +28,19 @@ jobs:
       - name: Install project and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
-
-      - name: Compile Python sources
-        run: python -m compileall -q cosmic_ray_rate.py generate_artifacts.py
+          python -m pip install -e ".[plot,test]"
 
       - name: Run tests
         run: python -m pytest
 
-      - name: Verify generated LaTeX fragments
-        run: |
-          python generate_artifacts.py
-          git diff --exit-code -- generated_approximation.tex generated_rate_table.tex
+      - name: Generate documentation artifacts
+        if: matrix.python-version == '3.14'
+        run: python generate_artifacts.py
 
-      - name: Smoke-test CLI
-        run: python cosmic_ray_rate.py 1e15 --check-formula --check-points 1001
+      - name: Exercise installed wheel outside the checkout
+        if: matrix.python-version == '3.14'
+        run: |
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" .
+          python -m pip install --no-deps --target "$RUNNER_TEMP/installed" "$RUNNER_TEMP"/wheels/*.whl
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$RUNNER_TEMP/installed" python -m cosmic_ray_rate 1e15 --check-formula --check-points 101

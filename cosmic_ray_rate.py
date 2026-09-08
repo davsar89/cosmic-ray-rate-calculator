@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
-import hashlib
 import math
 import re
 import site
@@ -28,16 +27,14 @@ _NUMERIC_CELL_RE = re.compile(
 TailModel = Literal["truncate", "last-segment"]
 Geometry = Literal["flat", "hemisphere", "full_sky"]
 
-# Break points for the documented piecewise approximation. The rates and
-# exponents are derived from the selected spectrum rather than duplicated as
-# hard-coded constants.
+# Five intervals selected against the bundled reference and rounded for use in
+# the formula. Rates and exponents are fitted from the selected spectrum below.
 APPROX_BREAKS_EV = (
     1.0e10,
-    1.0e12,
-    2.0e15,
-    5.0e16,
-    3.0e18,
-    3.0e19,
+    4.5e11,
+    6.4e15,
+    6.0e18,
+    3.3e19,
     1.0e20,
 )
 
@@ -52,7 +49,8 @@ def _find_default_csv() -> Path:
     source_tree_path = Path(__file__).with_name("data.csv")
     share_suffix = Path("share") / "cosmic-ray-rate-calculator" / "data.csv"
 
-    candidates = [source_tree_path]
+    # --target installs place the share directory beside the module.
+    candidates = [source_tree_path, Path(__file__).parent / share_suffix]
     data_root = sysconfig.get_path("data")
     if data_root:
         candidates.append(Path(data_root) / share_suffix)
@@ -80,11 +78,7 @@ class Spectrum:
     energies_eV: tuple[float, ...]
     fluxes_per_m2_sr_s_GeV: tuple[float, ...]
     segment_gammas: tuple[float, ...]
-    segment_integrals_eV: tuple[float, ...]
     cumulative_integrals_eV: tuple[float, ...]
-    source_path: Path
-    source_sha256: str
-    dataset_sha256: str
 
     @property
     def min_energy_eV(self) -> float:
@@ -102,7 +96,7 @@ class Approximation:
     breaks_eV: tuple[float, ...]
     rates_per_s_per_km2: tuple[float, ...]
     exponents: tuple[float, ...]
-    dataset_sha256: str
+    spectrum: Spectrum
     tail_model: TailModel
 
 
@@ -129,6 +123,18 @@ def _normalise_geometry(geometry: str) -> Geometry:
     return geometry  # type: ignore[return-value]
 
 
+def _log_ratio(numerator: float, denominator: float) -> float:
+    """Log of a positive ratio, preserving nearby endpoints and wide ranges."""
+    if numerator < denominator:
+        return -_log_ratio(denominator, numerator)
+    ratio = numerator / denominator
+    if ratio < 2.0:
+        return math.log1p((numerator - denominator) / denominator)
+    if math.isfinite(ratio):
+        return math.log(ratio)
+    return math.log(numerator) - math.log(denominator)
+
+
 def _integrate_power_law_from_reference(
     e_lo_eV: float,
     e_hi_eV: float,
@@ -136,17 +142,17 @@ def _integrate_power_law_from_reference(
     gamma: float,
 ) -> float:
     """Integrate f_lo * (E / e_lo_eV)**gamma over [e_lo_eV, e_hi_eV]."""
-    if not (0.0 < e_lo_eV < e_hi_eV):
+    if not (0.0 < e_lo_eV < e_hi_eV < math.inf):
         raise ValueError("power-law integration bounds must satisfy 0 < lower < upper")
     _require_positive_finite(f_lo, "f_lo")
     if not math.isfinite(gamma):
         raise ValueError("power-law exponent must be finite")
 
-    log_ratio = math.log(e_hi_eV / e_lo_eV)
+    log_ratio = _log_ratio(e_hi_eV, e_lo_eV)
     exponent_plus_one = gamma + 1.0
 
     try:
-        if math.isclose(exponent_plus_one, 0.0, rel_tol=0.0, abs_tol=1.0e-12):
+        if exponent_plus_one == 0.0:
             integral = f_lo * e_lo_eV * log_ratio
         else:
             # expm1 is stable when gamma is close to -1 and avoids constructing a
@@ -165,24 +171,8 @@ def _integrate_power_law_from_reference(
     return integral
 
 
-def _integrate_power_law_segment(
-    e_lo_eV: float,
-    e_hi_eV: float,
-    f_lo: float,
-    f_hi: float,
-) -> float:
-    """Integrate a log-log segment defined by two positive endpoints."""
-    _require_positive_finite(e_lo_eV, "e_lo_eV")
-    _require_positive_finite(e_hi_eV, "e_hi_eV")
-    if e_lo_eV >= e_hi_eV:
-        raise ValueError("segment energies must satisfy e_lo_eV < e_hi_eV")
-    _require_positive_finite(f_lo, "f_lo")
-    _require_positive_finite(f_hi, "f_hi")
-    gamma = math.log(f_hi / f_lo) / math.log(e_hi_eV / e_lo_eV)
-    return _integrate_power_law_from_reference(e_lo_eV, e_hi_eV, f_lo, gamma)
-
-
-def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
+@lru_cache(maxsize=32)
+def _parse_spectrum(path: Path, text: str) -> Spectrum:
     meaningful_lines = [
         (line_number, raw_line)
         for line_number, raw_line in enumerate(text.splitlines(), start=1)
@@ -193,7 +183,7 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
 
     header_line_number, header_line = meaningful_lines[0]
     try:
-        header = tuple(cell.strip() for cell in next(csv.reader([header_line])))
+        header = tuple(cell.strip() for cell in next(csv.reader([header_line], strict=True)))
     except csv.Error as exc:
         raise ValueError(f"{path}:{header_line_number}: invalid CSV header: {exc}") from exc
 
@@ -207,7 +197,7 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
     records: list[tuple[float, float, int]] = []
     for line_number, raw_line in meaningful_lines[1:]:
         try:
-            row = next(csv.reader([raw_line]))
+            row = next(csv.reader([raw_line], strict=True))
         except csv.Error as exc:
             raise ValueError(f"{path}:{line_number}: invalid CSV row: {exc}") from exc
 
@@ -251,7 +241,7 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
     gammas: list[float] = []
     segment_integrals: list[float] = []
     for e_lo, e_hi, f_lo, f_hi in zip(energies, energies[1:], fluxes, fluxes[1:]):
-        gamma = math.log(f_hi / f_lo) / math.log(e_hi / e_lo)
+        gamma = _log_ratio(f_hi, f_lo) / _log_ratio(e_hi, e_lo)
         if not math.isfinite(gamma):
             raise ValueError(f"{path}: non-finite log-log slope in spectrum")
         gammas.append(gamma)
@@ -263,30 +253,15 @@ def _parse_spectrum(path: Path, text: str, digest: str) -> Spectrum:
     for index in range(len(segment_integrals) - 1, -1, -1):
         cumulative[index] = cumulative[index + 1] + segment_integrals[index]
 
-    semantic_hasher = hashlib.sha256()
-    for energy_eV, flux in zip(energies, fluxes):
-        semantic_hasher.update(energy_eV.hex().encode("ascii"))
-        semantic_hasher.update(b",")
-        semantic_hasher.update(flux.hex().encode("ascii"))
-        semantic_hasher.update(b"\n")
+    if not math.isfinite(cumulative[0]):
+        raise ValueError(f"{path}: integrated spectrum exceeds floating-point range")
 
     return Spectrum(
         energies_eV=energies,
         fluxes_per_m2_sr_s_GeV=fluxes,
         segment_gammas=tuple(gammas),
-        segment_integrals_eV=tuple(segment_integrals),
         cumulative_integrals_eV=tuple(cumulative),
-        source_path=path,
-        source_sha256=digest,
-        dataset_sha256=semantic_hasher.hexdigest(),
     )
-
-
-# Parsed spectra keyed on (resolved path, content SHA-256). Keying on the
-# content digest instead of stat metadata means a rewritten file is always
-# re-parsed, even when its size and mtime survive the rewrite.
-_SPECTRUM_CACHE_MAX_ENTRIES = 32
-_spectrum_cache: dict[tuple[str, str], Spectrum] = {}
 
 
 def load_spectrum(csv_path: Path | str = DEFAULT_CSV) -> Spectrum:
@@ -295,26 +270,14 @@ def load_spectrum(csv_path: Path | str = DEFAULT_CSV) -> Spectrum:
     if path.is_dir():
         raise ValueError(f"Spectrum path is not a regular file: {path}")
     try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        raise ValueError(f"Could not read spectrum file {path}: {exc.strerror or exc}") from exc
-    digest = hashlib.sha256(raw_bytes).hexdigest()
-
-    key = (str(path), digest)
-    cached = _spectrum_cache.get(key)
-    if cached is not None:
-        return cached
-
-    try:
-        # utf-8-sig drops a leading BOM before comment/header filtering sees it.
-        text = raw_bytes.decode("utf-8-sig")
+        # Cache parsing by the actual text; edits take effect even if file
+        # timestamps are preserved. No separate content identifiers are needed.
+        text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{path}: CSV file must be UTF-8 text") from exc
-    spectrum = _parse_spectrum(path, text, digest)
-    if len(_spectrum_cache) >= _SPECTRUM_CACHE_MAX_ENTRIES:
-        _spectrum_cache.clear()
-    _spectrum_cache[key] = spectrum
-    return spectrum
+    except OSError as exc:
+        raise ValueError(f"Could not read spectrum file {path}: {exc.strerror or exc}") from exc
+    return _parse_spectrum(path, text)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +365,10 @@ def _integrated_intensity_above_from_spectrum(
 
     # The CSV flux is differential per GeV while the energy coordinates are eV:
     # dE_GeV = dE_eV / 1e9.
-    return integral_eV * 1.0e-9
+    intensity = integral_eV * 1.0e-9
+    if integral_eV > 0.0 and intensity == 0.0:
+        raise ValueError("integrated intensity is below floating-point range")
+    return intensity
 
 
 def integrated_intensity_above(
@@ -438,6 +404,13 @@ def _geometry_factor_sr(geometry: Geometry) -> float:
     return 4.0 * math.pi
 
 
+def _rate_from_intensity(intensity: float, aperture_m2_sr: float) -> float:
+    rate = intensity * aperture_m2_sr
+    if not math.isfinite(rate) or (intensity > 0.0 and rate == 0.0):
+        raise ValueError("calculated rate is outside floating-point range")
+    return rate
+
+
 def _rate_above_from_spectrum(
     threshold_eV: float,
     spectrum: Spectrum,
@@ -450,11 +423,7 @@ def _rate_above_from_spectrum(
     intensity = _integrated_intensity_above_from_spectrum(
         threshold_eV, spectrum, tail_model
     )
-    area_m2 = area_km2 * 1.0e6
-    rate = intensity * _geometry_factor_sr(geometry) * area_m2
-    if not math.isfinite(rate):
-        raise ValueError("calculated rate is not finite; reduce the supplied area")
-    return rate
+    return _rate_from_intensity(intensity, area_km2 * 1.0e6 * _geometry_factor_sr(geometry))
 
 
 def rate_above(
@@ -508,10 +477,7 @@ def rate_above_from_aperture(
     intensity = integrated_intensity_above(
         threshold_eV, csv_path=csv_path, tail_model=tail_model
     )
-    rate = intensity * aperture_m2_sr
-    if not math.isfinite(rate):
-        raise ValueError("calculated rate is not finite; reduce the supplied aperture")
-    return rate
+    return _rate_from_intensity(intensity, aperture_m2_sr)
 
 
 # ---------------------------------------------------------------------------
@@ -565,21 +531,52 @@ def _calibrate_approximation_cached(
     breaks_eV: tuple[float, ...],
     tail_model: TailModel,
 ) -> Approximation:
-    rates = tuple(
-        _rate_above_from_spectrum(
-            threshold,
-            spectrum,
-            area_km2=1.0,
-            geometry="flat",
-            tail_model=tail_model,
+    # Fit log(rate) at each interval's endpoints and log-energy quarter points,
+    # counting shared endpoints once. Shared nodal values enforce continuity.
+    # Each sample involves two adjacent nodes, so the normal matrix is
+    # tridiagonal and needs only a short forward/back substitution.
+    count = len(breaks_eV)
+    diagonal = [0.0] * count
+    off_diagonal = [0.0] * (count - 1)
+    rhs = [0.0] * count
+    for i, (e_lo, e_hi) in enumerate(zip(breaks_eV, breaks_eV[1:])):
+        for quarter in range(5 if i == count - 2 else 4):
+            fraction = quarter / 4.0
+            energy = e_lo if quarter == 0 else e_hi if quarter == 4 else (
+                e_lo * math.exp(fraction * _log_ratio(e_hi, e_lo))
+            )
+            reference = _rate_above_from_spectrum(
+                energy, spectrum, area_km2=1.0, geometry="flat", tail_model=tail_model
+            )
+            log_rate = math.log(_require_positive_finite(reference, "calibration rate"))
+            left = 1.0 - fraction
+            diagonal[i] += left * left
+            diagonal[i + 1] += fraction * fraction
+            off_diagonal[i] += left * fraction
+            rhs[i] += left * log_rate
+            rhs[i + 1] += fraction * log_rate
+
+    for i in range(1, count):
+        factor = off_diagonal[i - 1] / diagonal[i - 1]
+        diagonal[i] -= factor * off_diagonal[i - 1]
+        rhs[i] -= factor * rhs[i - 1]
+    log_rates = [0.0] * count
+    log_rates[-1] = rhs[-1] / diagonal[-1]
+    for i in range(count - 2, -1, -1):
+        log_rates[i] = (rhs[i] - off_diagonal[i] * log_rates[i + 1]) / diagonal[i]
+
+    if any(lo <= hi for lo, hi in zip(log_rates, log_rates[1:])):
+        raise ValueError("Fitted rate must decrease with energy; choose different break energies")
+    try:
+        rates = tuple(
+            _require_positive_finite(math.exp(value), "fitted rate")
+            for value in log_rates
         )
-        for threshold in breaks_eV
-    )
-    if any(not math.isfinite(rate) or rate <= 0.0 for rate in rates):
-        raise ValueError("Approximation calibration produced a non-positive rate")
+    except OverflowError as exc:
+        raise ValueError("Fitted rate exceeds floating-point range") from exc
 
     exponents = tuple(
-        -math.log(rate_hi / rate_lo) / math.log(e_hi / e_lo)
+        -_log_ratio(rate_hi, rate_lo) / _log_ratio(e_hi, e_lo)
         for e_lo, e_hi, rate_lo, rate_hi in zip(
             breaks_eV, breaks_eV[1:], rates, rates[1:]
         )
@@ -588,7 +585,7 @@ def _calibrate_approximation_cached(
         breaks_eV=breaks_eV,
         rates_per_s_per_km2=rates,
         exponents=exponents,
-        dataset_sha256=spectrum.dataset_sha256,
+        spectrum=spectrum,
         tail_model=tail_model,
     )
 
@@ -599,7 +596,11 @@ def calibrate_piecewise_approximation(
     breaks_eV: Sequence[float] = APPROX_BREAKS_EV,
     tail_model: TailModel = "truncate",
 ) -> Approximation:
-    """Explicitly calibrate the piecewise approximation to a selected dataset."""
+    """Fit a continuous power law per interval to log-rates at quarter points.
+
+    Breakpoint rates are fitted, so they need not equal the reference there.
+    A fit that increases with threshold is rejected.
+    """
     normalised_tail_model = _normalise_tail_model(tail_model)
     spectrum = load_spectrum(csv_path)
     validated_breaks = _validate_breaks(breaks_eV, spectrum, normalised_tail_model)
@@ -612,17 +613,9 @@ def _approximation_matches(
     approximation: Approximation, spectrum: Spectrum, tail_model: TailModel
 ) -> bool:
     return (
-        approximation.dataset_sha256 == spectrum.dataset_sha256
+        approximation.spectrum == spectrum
         and approximation.tail_model == tail_model
     )
-
-
-@lru_cache(maxsize=1)
-def _default_approximation() -> Approximation:
-    # The bundled dataset is treated as immutable within a process; paths that
-    # depend on the dataset re-check _approximation_matches against a freshly
-    # loaded spectrum, so a mid-process edit raises instead of mismatching.
-    return calibrate_piecewise_approximation(DEFAULT_CSV)
 
 
 def approx_rate_above_flat_km2(
@@ -639,7 +632,10 @@ def approx_rate_above_flat_km2(
     """
     _require_positive_finite(threshold_eV, "threshold_eV")
     _require_positive_finite(area_km2, "area_km2")
-    selected = approximation if approximation is not None else _default_approximation()
+    selected = (
+        approximation if approximation is not None
+        else calibrate_piecewise_approximation(DEFAULT_CSV)
+    )
 
     if (
         len(selected.breaks_eV) < 2
@@ -669,8 +665,8 @@ def approx_rate_above_flat_km2(
         except OverflowError as exc:
             raise ValueError("calculated approximation overflowed") from exc
 
-    if not math.isfinite(rate):
-        raise ValueError("calculated approximation is not finite")
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise ValueError("calculated approximation is outside floating-point range")
     return rate
 
 
@@ -732,29 +728,22 @@ def _select_approximation_for_spectrum(
     tail_model: TailModel,
     approximation: Approximation | None,
 ) -> Approximation:
-    selected = approximation
-    if selected is None:
-        default = _default_approximation()
-        if not _approximation_matches(default, spectrum, tail_model):
-            raise ValueError(
-                "The built-in approximation is tied to the bundled data.csv and "
-                "tail_model='truncate'. Explicitly recalibrate an approximation "
-                "for this dataset/tail model first."
-            )
-        selected = default
-
+    selected = (
+        approximation if approximation is not None
+        else calibrate_piecewise_approximation(DEFAULT_CSV)
+    )
     if not _approximation_matches(selected, spectrum, tail_model):
         raise ValueError(
-            "The supplied approximation was calibrated for a different dataset "
-            "or tail model"
+            "The approximation was calibrated for a different dataset or tail "
+            "model. Explicitly recalibrate it for the selected spectrum."
         )
     return selected
 
 
 def _sampled_rates(
     csv_path: Path | str,
-    e_min_eV: float,
-    e_max_eV: float,
+    e_min_eV: float | None,
+    e_max_eV: float | None,
     n_points: int,
     tail_model: TailModel,
     approximation: Approximation | None,
@@ -769,6 +758,10 @@ def _sampled_rates(
     selected = _select_approximation_for_spectrum(
         spectrum, normalised_tail_model, approximation
     )
+    if e_min_eV is None:
+        e_min_eV = selected.breaks_eV[0]
+    if e_max_eV is None:
+        e_max_eV = selected.breaks_eV[-1]
     _validate_sampling_range(e_min_eV, e_max_eV, n_points, selected)
 
     samples: list[tuple[float, float, float]] = []
@@ -787,8 +780,8 @@ def _sampled_rates(
 
 def compare_formula(
     csv_path: Path | str = DEFAULT_CSV,
-    e_min_eV: float = 1.0e10,
-    e_max_eV: float = 1.0e20,
+    e_min_eV: float | None = None,
+    e_max_eV: float | None = None,
     n_points: int = 10_001,
     *,
     tail_model: TailModel = "truncate",
@@ -796,8 +789,8 @@ def compare_formula(
 ) -> tuple[float, float, float]:
     """Return median, linear p95, and worst sampled relative error.
 
-    Thresholds are uniformly spaced in log10(E). These are sampled statistics,
-    not mathematical global bounds.
+    Thresholds span the calibration range unless bounds are supplied, uniformly
+    spaced in log10(E). These are sampled statistics, not global bounds.
     """
     _, samples = _sampled_rates(
         csv_path, e_min_eV, e_max_eV, n_points, tail_model, approximation
@@ -815,14 +808,14 @@ def compare_formula(
 def make_comparison_plot(
     output_path: Path | str,
     csv_path: Path | str = DEFAULT_CSV,
-    e_min_eV: float = 1.0e10,
-    e_max_eV: float = 1.0e20,
+    e_min_eV: float | None = None,
+    e_max_eV: float | None = None,
     n_points: int = 600,
     *,
     tail_model: TailModel = "truncate",
     approximation: Approximation | None = None,
 ) -> None:
-    """Write a reference-versus-approximation plot."""
+    """Plot over the calibration range unless explicit bounds are supplied."""
     try:
         import matplotlib
 
@@ -876,8 +869,10 @@ def make_comparison_plot(
     ax_bottom.grid(True, which="both", alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(Path(output_path), dpi=180, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        fig.savefig(Path(output_path), dpi=180, bbox_inches="tight")
+    finally:
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -887,36 +882,14 @@ def make_comparison_plot(
 
 def _positive_float_argument(value: str) -> float:
     try:
-        parsed = float(value)
+        return _require_positive_finite(float(value), "value")
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a number") from exc
-    if not math.isfinite(parsed) or parsed <= 0.0:
-        raise argparse.ArgumentTypeError("must be finite and greater than zero")
-    return parsed
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _breaks_argument(value: str) -> tuple[float, ...]:
-    parts = [part.strip() for part in value.split(",")]
-    if len(parts) < 2:
-        raise argparse.ArgumentTypeError(
-            "must list at least two comma-separated energies"
-        )
-    breaks: list[float] = []
-    for part in parts:
-        try:
-            parsed = float(part)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                "must be comma-separated numbers"
-            ) from exc
-        if not math.isfinite(parsed) or parsed <= 0.0:
-            raise argparse.ArgumentTypeError(
-                "energies must be finite and greater than zero"
-            )
-        breaks.append(parsed)
-    if any(left >= right for left, right in zip(breaks, breaks[1:])):
-        raise argparse.ArgumentTypeError("energies must be strictly increasing")
-    return tuple(breaks)
+    # Calibration owns the number, order, and supported range of breaks.
+    return tuple(_positive_float_argument(part.strip()) for part in value.split(","))
 
 
 def _check_points_argument(value: str) -> int:
@@ -1060,13 +1033,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # and tail model match it; a missing/broken bundled data.csv just
             # means no shortcut is available, not a hard failure.
             try:
-                candidate = _default_approximation()
-            except (OSError, ValueError):
-                candidate = None
-            if candidate is not None and _approximation_matches(
-                candidate, spectrum, tail_model
-            ):
-                approximation = candidate
+                approximation = _select_approximation_for_spectrum(spectrum, tail_model, None)
+            except ValueError:
+                pass
 
         if args.aperture_m2_sr is not None:
             reference_rate = rate_above_from_aperture(
